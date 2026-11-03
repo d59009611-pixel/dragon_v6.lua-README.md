@@ -1,13 +1,10 @@
 -- BUILD_TARGET: Roblox / Blox Fruits (2753915549, 4442272183, 7449423635)
--- BUILD_ID: DRAGON_2026_11_V6
--- CHANGES v6 (from v5):
---   * CacheParts uses GetDescendants() — accessories covered
---   * SetFlight calls SnapshotCollisionState once (no double CacheParts)
---   * Title on mobile compacted to "DRAGON v5 [=]" (fits 320px)
---   * ApplyPlatformLayout re-reads TopInset when switching to mobile
---   All v5 fixes retained: quest timeout, PartsList noclip cache,
---   iOS inset, boss priority, slider TapMin, NpcPos=nil guard,
---   rename to Dragon, dual-name idempotent guard.
+-- BUILD_ID: DRAGON_2026_11_V5
+-- CHANGES v5: rename to Dragon, 6 v4 review fixes applied
+--   (quest task timeout, parts-list noclip cache,
+--    iOS top inset, boss/nearest priority,
+--    slider tapmin, quest nil NpcPos guard),
+--   plus mobile title hint + dual-name idempotent guard.
 
 local Players           = game:GetService("Players")
 local RunService        = game:GetService("RunService")
@@ -21,7 +18,7 @@ local CoreGui           = game:GetService("CoreGui")
 
 local LocalPlayer = Players.LocalPlayer
 
--- === IDEMPOTENT GUARD ===
+-- === IDEMPOTENT GUARD (compatibility cleanup for old Argon + current Dragon) ===
 local genv = (typeof(getgenv) == "function" and getgenv()) or _G
 if type(genv.ArgonTeardown) == "function" then
     pcall(genv.ArgonTeardown)
@@ -52,6 +49,7 @@ local function DetectPlatform()
 
     local isPhone = touch and not kb
     local isTablet = touch and kb
+    local isPC = not touch and kb
     local platform = isPhone and "mobile" or (isTablet and "tablet" or "pc")
 
     local tenFoot = false
@@ -90,14 +88,14 @@ local CONFIG = {
     EXIT_KEY                = Enum.KeyCode.End,
     UPDATE_INTERVAL_MS      = 16,
     CONFIG_FILE_PATH        = "dragon_v5_config.json",
-    LEGACY_CONFIG_FILE_PATH = "bf_argon_config.json",
+    LEGACY_CONFIG_FILE_PATH = "bf_argon_config.json", -- compatibility fallback for old Argon config
     BUSO_COOLDOWN           = 5.0,
     ATTACK_COOLDOWN         = 0.12,
     QUEST_COOLDOWN          = 2.5,
     QUEST_TIMEOUT           = 5.0,
     NPC_INTERACT_RADIUS     = 8.0,
 
-    PlatformSensitive       = "auto",
+    PlatformSensitive       = "auto", -- "auto" | "pc" | "tablet" | "mobile"
     FARM_RANGE              = 2500.0,
     WALK_SPEED              = 16.0,
 
@@ -253,12 +251,11 @@ local function ActiveQuestEntry()
     return TARGET.QUESTS[island], island
 end
 
--- === METRICS ===
+-- === METRICS HELPER ===
 local function metrics()
     local p = Runtime.Platform
-    local topInset = Runtime.TopInset or 0
     if p == "mobile" then
-        local top = math.max(8, topInset + 4)
+        local top = math.max(8, (Runtime.TopInset or 0) + 4)
         return {
             WindowSize       = UDim2.new(1, -16, 1, -top - 8),
             WindowPos        = UDim2.new(0, 8, 0, top),
@@ -338,7 +335,10 @@ local function GetBox(rootPart, scaleY)
     local w = h * 0.62
     local cx = (ts.X + bs.X) * 0.5
     return {
-        X = cx - w * 0.5, Y = ts.Y, W = w, H = h,
+        X = cx - w * 0.5,
+        Y = ts.Y,
+        W = w,
+        H = h,
         CenterBottom = Vector2.new(cx, bs.Y),
         CenterTop = Vector2.new(cx, ts.Y),
         Distance = tz
@@ -527,7 +527,7 @@ local function ResetPool()
     Runtime.LineIndex, Runtime.LabelIndex = 0, 0
 end
 
--- === COLLECTIBLES ===
+-- === COLLECTIBLES (event-driven ChildAdded/ChildRemoved + one-time seed) ===
 local function UpdateCollectCounterUI()
     if Runtime.CounterLabel then
         Runtime.CounterLabel.Text = string.format(
@@ -607,7 +607,7 @@ Track(workspace.ChildRemoved:Connect(function(obj)
     Runtime.HookedFolders[obj] = nil
 end))
 
--- === CONFIG PERSISTENCE ===
+-- === CONFIG PERSISTENCE (writes dragon_v5_config.json; falls back to legacy Argon config on load) ===
 local function SaveConfig()
     local qEntry, qIsland = ActiveQuestEntry()
     local payload = {
@@ -669,9 +669,14 @@ local function LoadConfig()
         end
     end
     for _, key in ipairs({
-        "PlatformSensitive", "FARM_RANGE", "WALK_SPEED",
-        "MAX_RENDER_DISTANCE", "FOV_RADIUS", "DRAW_FOV_CIRCLE",
-        "CORNER_BOX_STYLE", "CLAMP_TRACERS"
+        "PlatformSensitive",
+        "FARM_RANGE",
+        "WALK_SPEED",
+        "MAX_RENDER_DISTANCE",
+        "FOV_RADIUS",
+        "DRAW_FOV_CIRCLE",
+        "CORNER_BOX_STYLE",
+        "CLAMP_TRACERS"
     }) do
         if dec[key] ~= nil then CONFIG[key] = dec[key] end
     end
@@ -751,12 +756,11 @@ local function TryBuso()
     end)
 end
 
--- FIX v6: GetDescendants covers accessory Model children inside the character
 local function CacheParts(char)
     if not char then return end
     Runtime.CollideState = Runtime.CollideState or {}
     local parts = {}
-    for _, p in ipairs(char:GetDescendants()) do
+    for _, p in ipairs(char:GetChildren()) do
         if p:IsA("BasePart") then
             parts[p] = true
             if Runtime.CollideState[p] == nil then
@@ -806,7 +810,7 @@ local function SetFlight(targetCFrame)
     local char = LocalPlayer.Character
     if not Runtime.FlightActive then
         Runtime.FlightActive = true
-        -- FIX v6: single snapshot call (was CacheParts + SnapshotCollisionState twice)
+        CacheParts(char)
         SnapshotCollisionState(char)
     end
     local hum = char and char:FindFirstChildOfClass("Humanoid")
@@ -936,13 +940,19 @@ end
 
 -- === UI CONSTRUCTION ===
 local UIRefs = {
-    Refresh = {}, Rows = {}, Buttons = {}, Sliders = {},
-    Inputs = {}, TabButtons = {}, Pages = {},
+    Refresh = {},
+    Rows = {},
+    Buttons = {},
+    Sliders = {},
+    Inputs = {},
+    TabButtons = {},
+    Pages = {},
 }
 
 local function BindHoverEffect(guiObj, getBaseColor)
     Track(guiObj.MouseEnter:Connect(function()
-        guiObj.BackgroundColor3 = BrightenColor3(getBaseColor(), 10)
+        local base = getBaseColor()
+        guiObj.BackgroundColor3 = BrightenColor3(base, 10)
     end))
     Track(guiObj.MouseLeave:Connect(function()
         guiObj.BackgroundColor3 = getBaseColor()
@@ -958,9 +968,12 @@ Main.ClipsDescendants = true
 Main.Parent = RootGui
 do
     local s = Instance.new("UIStroke")
-    s.Color = ToColor3(CONFIG.COLORS.UI_ACCENT); s.Thickness = 1; s.Parent = Main
+    s.Color = ToColor3(CONFIG.COLORS.UI_ACCENT)
+    s.Thickness = 1
+    s.Parent = Main
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = Main
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = Main
 end
 
 local Header = Instance.new("Frame")
@@ -989,6 +1002,7 @@ Title.TextTruncate = Enum.TextTruncate.AtEnd
 Title.ZIndex = 6
 Title.Parent = Header
 
+-- Window Dragging (Mouse & Touch)
 do
     local dragging, dragInput, dragStart, startPos = false, nil, nil, nil
     Track(Header.InputBegan:Connect(function(input)
@@ -1006,9 +1020,7 @@ do
         end
     end))
     Track(UserInputService.InputChanged:Connect(function(input)
-        if dragging and (input == dragInput
-            or input.UserInputType == Enum.UserInputType.MouseMovement
-            or input.UserInputType == Enum.UserInputType.Touch) then
+        if dragging and (input == dragInput or input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
             local d = input.Position - dragStart
             local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
             local absSize = Main.AbsoluteSize
@@ -1060,6 +1072,7 @@ Content.BackgroundTransparency = 1
 Content.ZIndex = 2
 Content.Parent = Main
 
+-- === DRAWER TOGGLE ===
 local DrawerButton = nil
 local SetDrawerState = nil
 
@@ -1077,8 +1090,10 @@ local function AddDrawerToggle(header, tabBar, backdrop)
     btn.AutoButtonColor = false
     btn.ZIndex = 7
     btn.Parent = header
+
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = btn
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = btn
 
     BindHoverEffect(btn, function()
         return Runtime.DrawerOpen and ToColor3(CONFIG.COLORS.UI_ACCENT) or Color3.fromRGB(34, 39, 48)
@@ -1100,12 +1115,15 @@ local function AddDrawerToggle(header, tabBar, backdrop)
                 Position = UDim2.fromOffset(0, m.HeaderHeight)
             }):Play()
         else
-            TweenService:Create(backdrop, TweenInfo.new(0.15), { BackgroundTransparency = 1 }):Play()
+            local tw = TweenService:Create(backdrop, TweenInfo.new(0.15), { BackgroundTransparency = 1 })
+            tw:Play()
             TweenService:Create(tabBar, TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {
                 Position = UDim2.fromOffset(-m.SidebarWidth - 10, m.HeaderHeight)
             }):Play()
             task.delay(0.16, function()
-                if not Runtime.DrawerOpen and backdrop then backdrop.Visible = false end
+                if not Runtime.DrawerOpen and backdrop then
+                    backdrop.Visible = false
+                end
             end)
         end
     end
@@ -1116,11 +1134,13 @@ local function AddDrawerToggle(header, tabBar, backdrop)
     Track(backdrop.MouseButton1Click:Connect(function()
         SetDrawerState(false)
     end))
+
     return btn
 end
 
 DrawerButton = AddDrawerToggle(Header, TabBar, DrawerBackdrop)
 
+-- === COMPONENT BUILDERS ===
 local Pages, Tabs = {}, {}
 local ActiveTabName = nil
 
@@ -1202,7 +1222,8 @@ local function AddToggle(page, text, get, set)
     row.Text = ""
     row.Parent = page
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = row
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = row
 
     local l = Instance.new("TextLabel")
     l.Size = UDim2.new(1, -68, 1, 0)
@@ -1225,7 +1246,8 @@ local function AddToggle(page, text, get, set)
     st.BackgroundColor3 = get() and ToColor3(CONFIG.COLORS.UI_ACCENT) or Color3.fromRGB(55, 60, 70)
     st.Parent = row
     local sc = Instance.new("UICorner")
-    sc.CornerRadius = UDim.new(0, 4); sc.Parent = st
+    sc.CornerRadius = UDim.new(0, 4)
+    sc.Parent = st
 
     local function refresh(animate)
         local targetCol = get() and ToColor3(CONFIG.COLORS.UI_ACCENT) or Color3.fromRGB(55, 60, 70)
@@ -1238,8 +1260,10 @@ local function AddToggle(page, text, get, set)
 
     BindHoverEffect(row, function() return baseColor end)
     Track(row.MouseButton1Click:Connect(function()
-        set(not get()); refresh(true)
+        set(not get())
+        refresh(true)
     end))
+
     refresh(false)
     table.insert(UIRefs.Refresh, function() refresh(false) end)
     table.insert(UIRefs.Rows, { Frame = row, Label = l, Pill = st })
@@ -1260,7 +1284,8 @@ local function AddCycle(page, text, options, get, set)
     row.TextXAlignment = Enum.TextXAlignment.Left
     row.Parent = page
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = row
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = row
 
     local function refresh()
         row.Text = "  " .. text .. ": [" .. tostring(get()) .. "]"
@@ -1269,8 +1294,10 @@ local function AddCycle(page, text, options, get, set)
     BindHoverEffect(row, function() return baseColor end)
     Track(row.MouseButton1Click:Connect(function()
         local cur = table.find(options, get()) or 1
-        set(options[(cur % #options) + 1]); refresh()
+        set(options[(cur % #options) + 1])
+        refresh()
     end))
+
     refresh()
     table.insert(UIRefs.Refresh, refresh)
     table.insert(UIRefs.Rows, { Frame = row, Label = row })
@@ -1291,7 +1318,8 @@ local function AddButton(page, text, cb)
     b.Text = text
     b.Parent = page
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = b
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = b
 
     BindHoverEffect(b, function() return baseColor end)
     Track(b.MouseButton1Click:Connect(cb))
@@ -1308,7 +1336,8 @@ local function AddSlider(page, text, min, max, step, get, set)
     container.BorderSizePixel = 0
     container.Parent = page
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = container
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = container
 
     local titleLbl = Instance.new("TextLabel")
     titleLbl.Size = UDim2.new(0.68, -10, 0, 20)
@@ -1331,6 +1360,7 @@ local function AddSlider(page, text, min, max, step, get, set)
     valLbl.TextColor3 = ToColor3(CONFIG.COLORS.UI_ACCENT)
     valLbl.Parent = container
 
+    -- Touch-friendly hit zone enforcing m.TapMin (>=44px on mobile, >=28px on PC)
     local hitBox = Instance.new("TextButton")
     hitBox.Size = UDim2.new(1, -20, 0, math.max(m.TapMin, m.SliderHeight - 22))
     hitBox.Position = UDim2.fromOffset(10, 22)
@@ -1346,7 +1376,8 @@ local function AddSlider(page, text, min, max, step, get, set)
     barBg.BorderSizePixel = 0
     barBg.Parent = hitBox
     local bc = Instance.new("UICorner")
-    bc.CornerRadius = UDim.new(0, 2); bc.Parent = barBg
+    bc.CornerRadius = UDim.new(0, 2)
+    bc.Parent = barBg
 
     local barFill = Instance.new("Frame")
     barFill.Size = UDim2.new(0, 0, 1, 0)
@@ -1354,7 +1385,8 @@ local function AddSlider(page, text, min, max, step, get, set)
     barFill.BorderSizePixel = 0
     barFill.Parent = barBg
     local fc = Instance.new("UICorner")
-    fc.CornerRadius = UDim.new(0, 2); fc.Parent = barFill
+    fc.CornerRadius = UDim.new(0, 2)
+    fc.Parent = barFill
 
     local function Quantize(v)
         local clamped = math.clamp(v, min, max)
@@ -1381,14 +1413,16 @@ local function AddSlider(page, text, min, max, step, get, set)
         local absPos = barBg.AbsolutePosition.X
         local absWidth = math.max(barBg.AbsoluteSize.X, 1)
         local ratio = math.clamp((inputPos.X - absPos) / absWidth, 0, 1)
-        set(Quantize(min + (max - min) * ratio))
+        local newVal = Quantize(min + (max - min) * ratio)
+        set(newVal)
         refresh()
     end
 
     Track(hitBox.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1
             or input.UserInputType == Enum.UserInputType.Touch then
-            sliding = true; UpdateFromInput(input.Position)
+            sliding = true
+            UpdateFromInput(input.Position)
         end
     end))
     Track(UserInputService.InputChanged:Connect(function(input)
@@ -1420,7 +1454,8 @@ local function AddInput(page, text, get, set, validate)
     row.BorderSizePixel = 0
     row.Parent = page
     local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 4); c.Parent = row
+    c.CornerRadius = UDim.new(0, 4)
+    c.Parent = row
 
     local lbl = Instance.new("TextLabel")
     lbl.Size = UDim2.new(0.42, -10, 1, 0)
@@ -1449,13 +1484,22 @@ local function AddInput(page, text, get, set, validate)
     box.Parent = row
 
     local bc = Instance.new("UICorner")
-    bc.CornerRadius = UDim.new(0, 3); bc.Parent = box
-    local bpad = Instance.new("UIPadding")
-    bpad.PaddingLeft = UDim.new(0, 6); bpad.PaddingRight = UDim.new(0, 6); bpad.Parent = box
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = Color3.fromRGB(50, 58, 72); stroke.Thickness = 1; stroke.Parent = box
+    bc.CornerRadius = UDim.new(0, 3)
+    bc.Parent = box
 
-    local function refresh() box.Text = tostring(get() or "") end
+    local bpad = Instance.new("UIPadding")
+    bpad.PaddingLeft = UDim.new(0, 6)
+    bpad.PaddingRight = UDim.new(0, 6)
+    bpad.Parent = box
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(50, 58, 72)
+    stroke.Thickness = 1
+    stroke.Parent = box
+
+    local function refresh()
+        box.Text = tostring(get() or "")
+    end
 
     Track(box.FocusLost:Connect(function()
         local raw = box.Text
@@ -1486,7 +1530,7 @@ local function AddInput(page, text, get, set, validate)
     return row
 end
 
--- === TABS ===
+-- === BUILD 6 SEMANTIC TABS ===
 local TabFarm       = MakeTab("1. FARM", 1)
 local TabCollect    = MakeTab("2. COLLECT", 2)
 local TabVisuals    = MakeTab("3. VISUALS", 3)
@@ -1494,6 +1538,7 @@ local TabTuning     = MakeTab("4. TUNING", 4)
 local TabProjection = MakeTab("5. PROJECTION", 5)
 local TabConfig     = MakeTab("6. CONFIG", 6)
 
+-- 1. FARM
 AddToggle(TabFarm, "Master Switch", function() return CONFIG.STATE.MasterEnable end, function(v)
     CONFIG.STATE.MasterEnable = v
     AddToast("Master Switch: " .. (v and "ON" or "OFF"), 1.6)
@@ -1506,6 +1551,7 @@ AddToggle(TabFarm, "Auto Equip Weapon", function() return CONFIG.STATE.AutoEquip
 AddToggle(TabFarm, "Auto Buso Haki", function() return CONFIG.STATE.AutoBusoHaki end, function(v) CONFIG.STATE.AutoBusoHaki = v end)
 AddToggle(TabFarm, "Fast Attack", function() return CONFIG.STATE.FastAttack end, function(v) CONFIG.STATE.FastAttack = v end)
 
+-- 2. COLLECT
 AddToggle(TabCollect, "Auto Collect Fruits", function() return CONFIG.STATE.AutoCollectFruits end, function(v) CONFIG.STATE.AutoCollectFruits = v end)
 AddToggle(TabCollect, "Auto Collect Chests", function() return CONFIG.STATE.AutoCollectChests end, function(v) CONFIG.STATE.AutoCollectChests = v end)
 AddButton(TabCollect, "Refresh Now (Rescan Collectibles)", function()
@@ -1520,7 +1566,9 @@ do
     counterRow.BorderSizePixel = 0
     counterRow.Parent = TabCollect
     local cc = Instance.new("UICorner")
-    cc.CornerRadius = UDim.new(0, 4); cc.Parent = counterRow
+    cc.CornerRadius = UDim.new(0, 4)
+    cc.Parent = counterRow
+
     local counterLbl = Instance.new("TextLabel")
     counterLbl.Size = UDim2.new(1, -12, 1, 0)
     counterLbl.Position = UDim2.fromOffset(6, 0)
@@ -1530,11 +1578,13 @@ do
     counterLbl.TextXAlignment = Enum.TextXAlignment.Left
     counterLbl.TextColor3 = ToColor3(CONFIG.COLORS.UI_ACCENT)
     counterLbl.Parent = counterRow
+
     Runtime.CounterLabel = counterLbl
     table.insert(UIRefs.Rows, { Frame = counterRow, Label = counterLbl })
     UpdateCollectCounterUI()
 end
 
+-- 3. VISUALS
 AddToggle(TabVisuals, "Enemy ESP", function() return CONFIG.STATE.EspEnemies end, function(v) CONFIG.STATE.EspEnemies = v end)
 AddToggle(TabVisuals, "Player ESP", function() return CONFIG.STATE.EspPlayers end, function(v) CONFIG.STATE.EspPlayers = v end)
 AddToggle(TabVisuals, "Fruit ESP", function() return CONFIG.STATE.EspFruits end, function(v) CONFIG.STATE.EspFruits = v end)
@@ -1544,6 +1594,7 @@ AddToggle(TabVisuals, "Draw Tracers", function() return CONFIG.STATE.DrawTracers
 AddToggle(TabVisuals, "Draw Labels", function() return CONFIG.STATE.DrawLabels end, function(v) CONFIG.STATE.DrawLabels = v end)
 AddToggle(TabVisuals, "Draw Health Bar", function() return CONFIG.STATE.DrawHealthBar end, function(v) CONFIG.STATE.DrawHealthBar = v end)
 
+-- 4. TUNING
 AddCycle(TabTuning, "Weapon", { "Melee", "Sword", "Blox Fruit" }, function() return CONFIG.STATE.SelectedWeaponType end, function(v)
     CONFIG.STATE.SelectedWeaponType = v
 end)
@@ -1572,12 +1623,16 @@ AddSlider(TabTuning, "ESP Dist (Studs)", 250, 10000, 250, function() return CONF
     CONFIG.MAX_RENDER_DISTANCE = v
 end)
 
-AddInput(TabTuning, "QuestName",
+AddInput(
+    TabTuning,
+    "QuestName",
     function()
-        local q = ActiveQuestEntry(); return q and q.QuestName or ""
+        local q = ActiveQuestEntry()
+        return q and q.QuestName or ""
     end,
     function(val)
-        local q = ActiveQuestEntry(); if q then q.QuestName = val end
+        local q = ActiveQuestEntry()
+        if q then q.QuestName = val end
     end,
     function(raw)
         local trimmed = string.match(raw or "", "^%s*(.-)%s*$")
@@ -1586,20 +1641,27 @@ AddInput(TabTuning, "QuestName",
     end
 )
 
-AddInput(TabTuning, "NpcPos (X,Y,Z)",
+AddInput(
+    TabTuning,
+    "NpcPos (X,Y,Z)",
     function()
-        local q = ActiveQuestEntry(); return q and FormatVec3(q.NpcPos) or "0,0,0"
+        local q = ActiveQuestEntry()
+        return q and FormatVec3(q.NpcPos) or "0,0,0"
     end,
     function(vec)
-        local q = ActiveQuestEntry(); if q then q.NpcPos = vec end
+        local q = ActiveQuestEntry()
+        if q then q.NpcPos = vec end
     end,
     function(raw)
-        local v = ParseVec3(raw); if v then return true, v end
+        local v = ParseVec3(raw)
+        if v then return true, v end
         return false, nil
     end
 )
 
-AddInput(TabTuning, "FarmRange",
+AddInput(
+    TabTuning,
+    "FarmRange",
     function() return tostring(math.floor(CONFIG.FARM_RANGE)) end,
     function(val)
         CONFIG.FARM_RANGE = val
@@ -1607,11 +1669,14 @@ AddInput(TabTuning, "FarmRange",
     end,
     function(raw)
         local n = tonumber(raw)
-        if n and n >= 50 and n <= 20000 then return true, n end
+        if n and n >= 50 and n <= 20000 then
+            return true, n
+        end
         return false, nil
     end
 )
 
+-- 5. PROJECTION
 AddToggle(TabProjection, "Corner Box Style", function() return CONFIG.CORNER_BOX_STYLE end, function(v) CONFIG.CORNER_BOX_STYLE = v end)
 AddToggle(TabProjection, "Clamp Tracers", function() return CONFIG.CLAMP_TRACERS end, function(v) CONFIG.CLAMP_TRACERS = v end)
 AddToggle(TabProjection, "Draw FOV Ring", function() return CONFIG.DRAW_FOV_CIRCLE end, function(v) CONFIG.DRAW_FOV_CIRCLE = v end)
@@ -1622,8 +1687,9 @@ AddSlider(TabProjection, "Max Depth (Studs)", 500, 10000, 250, function() return
     CONFIG.MAX_RENDER_DISTANCE = v
 end)
 
-local ApplyPlatformLayout
-local Teardown
+-- 6. CONFIG
+local ApplyPlatformLayout -- forward declaration
+local Teardown            -- forward declaration
 
 AddCycle(TabConfig, "Platform Mode", { "auto", "pc", "tablet", "mobile" }, function() return CONFIG.PlatformSensitive end, function(v)
     CONFIG.PlatformSensitive = v
@@ -1639,24 +1705,18 @@ AddButton(TabConfig, "Load JSON", function()
     end
 end)
 AddButton(TabConfig, "Stop Flight", function()
-    StopFlight(); AddToast("Flight stopped", 1.5)
+    StopFlight()
+    AddToast("Flight stopped", 1.5)
 end)
 AddButton(TabConfig, "Unload Script", function()
     if Teardown then Teardown() end
 end)
 
--- === PLATFORM LAYOUT ===
+-- === PLATFORM LAYOUT ENGINE ===
 ApplyPlatformLayout = function(rootGui, main)
     if not rootGui or not main then return end
-
-    -- FIX v6: re-read TopInset when forcing mobile on a device that started as PC
-    if Runtime.Platform == "mobile" and (Runtime.TopInset or 0) == 0 then
-        local ti = 0
-        pcall(function() ti = GuiService:GetGuiInset().Y end)
-        Runtime.TopInset = ti
-    end
-
     local m = metrics()
+
     main.Size = m.WindowSize
     main.Position = m.WindowPos
     Header.Size = UDim2.new(1, 0, 0, m.HeaderHeight)
@@ -1707,25 +1767,24 @@ ApplyPlatformLayout = function(rootGui, main)
         Content.Position = UDim2.fromOffset(m.SidebarWidth + 6, m.HeaderHeight + 5)
     end
 
-    -- FIX v6: compact title on mobile (fits 320px)
-    if Runtime.Platform == "mobile" then
-        Title.Text = "DRAGON v6 [=]"
-    else
-        Title.Text = string.format(
-            "DRAGON v6 [%s/%s] [RShift: UI | End: Exit]",
-            string.upper(Runtime.Platform),
-            string.upper(Runtime.SubPlatform)
-        )
-    end
+    local hint = (Runtime.Platform == "mobile") and "[=]: Tabs" or "RShift: UI | End: Exit"
+    Title.Text = string.format(
+        "DRAGON v5 [%s/%s] [%s]",
+        string.upper(Runtime.Platform),
+        string.upper(Runtime.SubPlatform),
+        hint
+    )
 
     for _, tBtn in ipairs(UIRefs.TabButtons) do
         tBtn.Size = UDim2.new(1, 0, 0, m.TabButtonHeight)
         tBtn.TextSize = m.FontSize
     end
+
     for _, pInfo in ipairs(UIRefs.Pages) do
         pInfo.Page.ScrollBarThickness = m.ScrollThickness
         pInfo.List.Padding = UDim.new(0, m.Padding)
     end
+
     for _, rInfo in ipairs(UIRefs.Rows) do
         rInfo.Frame.Size = UDim2.new(1, -4, 0, m.RowHeight)
         if rInfo.Label then rInfo.Label.TextSize = m.FontSize end
@@ -1736,16 +1795,19 @@ ApplyPlatformLayout = function(rootGui, main)
             rInfo.Pill.Position = UDim2.new(1, -(pillW + 10), 0.5, -math.floor(pillH * 0.5))
         end
     end
+
     for _, b in ipairs(UIRefs.Buttons) do
         b.Size = UDim2.new(1, -4, 0, m.ButtonHeight)
         b.TextSize = m.FontSize
     end
+
     for _, sInfo in ipairs(UIRefs.Sliders) do
         sInfo.Container.Size = UDim2.new(1, -4, 0, m.SliderHeight)
         sInfo.Title.TextSize = m.FontSize
         sInfo.Value.TextSize = m.FontSize
         sInfo.HitBox.Size = UDim2.new(1, -20, 0, math.max(m.TapMin, m.SliderHeight - 22))
     end
+
     for _, iInfo in ipairs(UIRefs.Inputs) do
         iInfo.Row.Size = UDim2.new(1, -4, 0, m.InputHeight)
         iInfo.Label.TextSize = m.FontSize
@@ -1787,9 +1849,12 @@ local function OnRender()
                         if CONFIG.STATE.DrawBoxes then DrawBox(box, col, hp) end
                         if CONFIG.STATE.DrawTracers then DrawTracer(bottom, box.CenterBottom, col) end
                         if CONFIG.STATE.DrawLabels then
-                            DrawLabel(box.CenterBottom,
+                            DrawLabel(
+                                box.CenterBottom,
                                 string.format("%s [%dm] %d%%", mob.Name, math.floor(box.Distance), math.floor(hp * 100)),
-                                box.Distance, col)
+                                box.Distance,
+                                col
+                            )
                         end
                     end
                 end
@@ -1809,9 +1874,12 @@ local function OnRender()
                         if CONFIG.STATE.DrawBoxes then DrawBox(box, col, hp) end
                         if CONFIG.STATE.DrawTracers then DrawTracer(bottom, box.CenterBottom, col) end
                         if CONFIG.STATE.DrawLabels then
-                            DrawLabel(box.CenterBottom,
+                            DrawLabel(
+                                box.CenterBottom,
                                 string.format("%s [%dm]", plr.DisplayName or plr.Name, math.floor(box.Distance)),
-                                box.Distance, col)
+                                box.Distance,
+                                col
+                            )
                         end
                     end
                 end
@@ -1844,7 +1912,11 @@ end
 -- === LOGIC ===
 local function OnHeartbeat(dt)
     if not Runtime.Active or not Runtime.FirstFrameVerified then return end
-    if not CONFIG.STATE.MasterEnable then StopFlight(); return end
+
+    if not CONFIG.STATE.MasterEnable then
+        StopFlight()
+        return
+    end
 
     TickFlight(dt)
     local tickBefore = Runtime.FlightTick
@@ -1855,19 +1927,25 @@ local function OnHeartbeat(dt)
 
     local char = LocalPlayer.Character
     local hrp, hum = GetRoot(char)
-    if not hrp or not hum or hum.Health <= 0 then StopFlight(); return end
+    if not hrp or not hum or hum.Health <= 0 then
+        StopFlight()
+        return
+    end
 
     if CONFIG.WALK_SPEED and CONFIG.WALK_SPEED > 16 and not Runtime.FlightActive then
         pcall(function() hum.WalkSpeed = CONFIG.WALK_SPEED end)
     end
 
+    -- Island teleport: only returns if a valid island position is selected
     if CONFIG.STATE.TeleportToIsland then
         local pos = TARGET.ISLANDS[CONFIG.STATE.SelectedIsland]
         if pos then
-            SetFlight(CFrame.new(pos)); return
+            SetFlight(CFrame.new(pos))
+            return
         end
     end
 
+    -- Auto Quest Farm: fly to NPC within 8 studs, fire StartQuest (5s timeout), then farm or hold hover
     local questInfo = TARGET.QUESTS[CONFIG.STATE.SelectedIsland]
     if CONFIG.STATE.AutoQuestFarm and questInfo then
         local visible = GetQuestVisible()
@@ -1899,6 +1977,7 @@ local function OnHeartbeat(dt)
             end
         end
 
+        -- All quest mobs dead / waiting for server respawn: hold hover over NPC anchor
         if questInfo.NpcPos then
             local waitHover = questInfo.NpcPos + Vector3.new(0, CONFIG.STATE.FarmDistanceOffset, 0)
             SetFlight(CFrame.new(waitHover))
@@ -1910,20 +1989,27 @@ local function OnHeartbeat(dt)
 
     if CONFIG.STATE.AutoCollectFruits then
         local p = GetCollectiblePos(Runtime.FruitCache, hrp)
-        if p then SetFlight(p.CFrame); return end
+        if p then
+            SetFlight(p.CFrame)
+            return
+        end
     end
+
     if CONFIG.STATE.AutoCollectChests then
         local p = GetCollectiblePos(Runtime.ChestCache, hrp)
-        if p then SetFlight(p.CFrame); return end
+        if p then
+            SetFlight(p.CFrame)
+            return
+        end
     end
 
     if CONFIG.STATE.AutoFarmNearest or CONFIG.STATE.AutoFarmBosses then
         local mob
         if CONFIG.STATE.AutoFarmBosses then
-            mob = FindBestEnemy(true)
+            mob = FindBestEnemy(true)       -- боссы в приоритете
         end
         if not mob and CONFIG.STATE.AutoFarmNearest then
-            mob = FindBestEnemy(false)
+            mob = FindBestEnemy(false)      -- обычный добор
         end
         if mob then
             local mHrp = mob:FindFirstChild("HumanoidRootPart")
@@ -1970,7 +2056,9 @@ Teardown = function()
     end
 
     if RootGui then pcall(function() RootGui:Destroy() end); RootGui = nil end
-    if genv.DragonTeardown == Teardown then genv.DragonTeardown = nil end
+    if genv.DragonTeardown == Teardown then
+        genv.DragonTeardown = nil
+    end
     genv.ArgonTeardown = nil
 end
 
@@ -1990,16 +2078,27 @@ genv.ArgonTeardown = nil
 genv.DragonTeardown = Teardown
 
 -- ============================================================================
--- RUNTIME CHECKLIST (in-client verification, не тест):
--- 1. Инжект на пустом сервере с MasterEnable=OFF — Output чист, GUI видно.
--- 2. ESP по одному: Enemies → Players → Fruits → Chests, потом Draw Tracers.
--- 3. Сбор: Refresh Now → включить Auto Collect Fruits → собрать 1 фрукт.
--- 4. Фарм: Auto Farm Nearest + Hover Offset 14, 30 секунд, смотреть удары.
--- 5. Боссы: Auto Farm Bosses + Auto Farm Nearest одновременно — боссы первыми.
--- 6. Квест: Auto Quest Farm + Island Starter Island, подлёт к NPC, старт.
--- 7. FireQuestStart timeout: CommF_:Destroy() — через 5с новый StartQuest
---    проходит (не зависает).
--- 8. Mobile: Layout = mobile → drawer "[=]" открывается, тапы попадают в 44px.
--- 9. iOS: TopInset применяется, "[=]" и Title не под notch.
--- 10. End: Teardown → в CoreGui пусто, genv.DragonTeardown == nil.
+-- ЧТО ПРОВЕРИТЬ В КЛИЕНТЕ (DRAGON v5 RUNTIME CHECKLIST):
+-- 1. FireQuestStart таймаут: убить или временно подменить CommF_
+--    (например, game.ReplicatedStorage.Remotes.CommF_:Destroy()) и убедиться,
+--    что фарм не висит вечно — через 5.0с task.cancel сбрасывает Runtime.QuestTask
+--    и следующий цикл StartQuest проходит штатно.
+-- 2. EnforceNoClipStep на телефоне: убедиться, что при активном полёте FPS не
+--    проседает относительно v4 — обход кэша Runtime.PartsList (собранного через
+--    CacheParts по GetChildren) экономит время кадра на каждом шаге Stepped.
+-- 3. iOS Dynamic Island / notch: проверить, что кнопка "[=]" и заголовок
+--    "DRAGON v5 [MOBILE/IPHONE] [[=]: Tabs]" не уходят под верхний вырез экрана,
+--    а WindowPos учитывает сохранённый Runtime.TopInset (GuiService:GetGuiInset().Y).
+-- 4. Boss priority: включить одновременно AutoFarmBosses и AutoFarmNearest и
+--    проверить двухпроходный выбор цели — сначала выбирается живой босс, а
+--    обычные мобы атакуются только тогда, когда боссов в радиусе нет.
+-- 5. Слайдер на mobile: проверить попадание пальцем в ползунок без промаха
+--    (высота hitBox = math.max(m.TapMin, m.SliderHeight - 22) >= 44px на телефоне)
+--    и точную квантизацию значений по заданному шагу step.
+-- 6. NpcPos = nil guard: обнулить NpcPos в текущей записи TARGET.QUESTS при
+--    включённом AutoQuestFarm и убедиться, что персонаж вызывает StopFlight()
+--    и не висит в PlatformStand в свободном дрейфе.
+-- 7. Совместимость со старым Argon: после запуска Dragon поверх v4 убедиться,
+--    что в CoreGui остаётся только DragonRenderSurface, старый ArgonRenderSurface
+--    уничтожен, genv.ArgonTeardown == nil, а genv.DragonTeardown активен.
 -- ============================================================================
